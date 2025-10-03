@@ -2,4 +2,11 @@
 /docs
 /plots
 *~
+*.b[ac]k*
+*.fix*
+*.block*
+*.test*
+*.backup
 *#
+/wavesim_py
+

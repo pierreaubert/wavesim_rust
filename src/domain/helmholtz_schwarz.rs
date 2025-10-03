@@ -112,7 +112,7 @@ impl SchwarzHelmholtzSolver {
                     global_domain.pixel_size,
                     global_domain.wavelength,
                     [false, false, false],    // Non-periodic for subdomains
-                    [[2, 2], [2, 2], [2, 2]], // Small absorbing boundaries
+                    [[0, 0], [0, 0], [0, 0]], // No PML - use Schwarz overlap instead
                 );
 
                 LocalHelmholtzDomain {
@@ -129,6 +129,13 @@ impl SchwarzHelmholtzSolver {
 
     /// Set source field for the problem
     pub fn set_source(&mut self, global_source: &WaveArray<Complex64>) {
+        // DEBUG: Check global source magnitude
+        let global_max = global_source
+            .data
+            .iter()
+            .map(|c: &Complex64| c.norm())
+            .fold(0.0, f64::max);
+        println!("DEBUG: Global source max magnitude: {:.2e}", global_max);
         // Distribute source to local subdomains
         for local in &mut self.local_domains {
             let local_shape = local.solution.read().unwrap().shape_tuple();
@@ -269,8 +276,8 @@ impl SchwarzHelmholtzSolver {
         // Solve local Helmholtz problem: (I - P*M)*u = P*source
         // Use preconditioned Richardson with more iterations
         let iter_config = IterationConfig {
-            max_iterations: 50, // More iterations per subdomain
-            threshold: 1e-6,    // Tighter tolerance
+            max_iterations: 500, // More iterations per subdomain
+            threshold: 1e-6,     // Tighter tolerance
             alpha: 0.75,
             full_residuals: false,
         };
@@ -306,30 +313,76 @@ impl SchwarzHelmholtzSolver {
 
         residual.norm_squared().sqrt()
     }
+    /// Compute smooth weight function for partition of unity
+    /// Uses a cosine-based transition function in overlap regions
+    fn compute_smooth_weight(
+        gi: usize,
+        gj: usize,
+        gk: usize,
+        subdomain_start: [usize; 3],
+        subdomain_end: [usize; 3],
+        _extended_start: [usize; 3],
+        _extended_end: [usize; 3],
+        overlap: usize,
+    ) -> f64 {
+        use std::f64::consts::PI;
+
+        // Calculate distance to subdomain boundaries
+        let mut weight = 1.0;
+
+        // For each dimension, compute transition weight if in overlap region
+        for dim in 0..3 {
+            let pos = [gi, gj, gk][dim];
+            let start = subdomain_start[dim];
+            let end = subdomain_end[dim];
+
+            if pos < start {
+                // In left overlap region
+                let dist_from_boundary = (start - pos) as f64;
+                if dist_from_boundary < overlap as f64 {
+                    // Smooth transition from 0 to 1 using cosine
+                    let t = dist_from_boundary / overlap as f64;
+                    weight *= 0.5 * (1.0 - (PI * t).cos());
+                } else {
+                    weight = 0.0;
+                    break;
+                }
+            } else if pos >= end {
+                // In right overlap region
+                let dist_from_boundary = (pos - end + 1) as f64;
+                if dist_from_boundary < overlap as f64 {
+                    // Smooth transition from 1 to 0 using cosine
+                    let t = dist_from_boundary / overlap as f64;
+                    weight *= 0.5 * (1.0 + (PI * t).cos());
+                } else {
+                    weight = 0.0;
+                    break;
+                }
+            }
+            // else: pos is in [start, end), use full weight (1.0)
+        }
+
+        weight
+    }
 
     /// Gather global solution from local subdomains
     pub fn gather_solution(&self) -> WaveArray<Complex64> {
         let mut global = WaveArray::zeros(self.global_domain.shape);
-        let mut weights: WaveArray<Complex64> = WaveArray::zeros(self.global_domain.shape);
+        let mut weights =
+            vec![
+                vec![vec![0.0; self.global_domain.shape.2]; self.global_domain.shape.1];
+                self.global_domain.shape.0
+            ];
 
-        // Accumulate solutions with partition of unity
+        // Accumulate solutions with proper partition of unity
         for local in &self.local_domains {
             let local_solution = local.solution.read().unwrap();
 
-            // Copy interior points (without overlap) with full weight
-            let interior_start = [
-                local.subdomain.start[0].max(local.extended_start[0] + self.overlap),
-                local.subdomain.start[1].max(local.extended_start[1] + self.overlap),
-                local.subdomain.start[2].max(local.extended_start[2] + self.overlap),
-            ];
+            // Calculate the actual subdomain boundaries (without overlap)
+            let subdomain_start = local.subdomain.start;
+            let subdomain_end = local.subdomain.end;
 
-            let interior_end = [
-                local.subdomain.end[0].min(local.extended_end[0] - self.overlap),
-                local.subdomain.end[1].min(local.extended_end[1] - self.overlap),
-                local.subdomain.end[2].min(local.extended_end[2] - self.overlap),
-            ];
-
-            // Copy with smooth transition in overlap regions
+            // Copy all points from the extended domain with smooth weighting
             for gi in local.extended_start[0]..local.extended_end[0] {
                 for gj in local.extended_start[1]..local.extended_end[1] {
                     for gk in local.extended_start[2]..local.extended_end[2] {
@@ -344,35 +397,58 @@ impl SchwarzHelmholtzSolver {
                         let lj = gj - local.extended_start[1];
                         let lk = gk - local.extended_start[2];
 
-                        // Compute weight (1.0 in interior, smooth transition in overlap)
-                        let weight = if gi >= interior_start[0]
-                            && gi < interior_end[0]
-                            && gj >= interior_start[1]
-                            && gj < interior_end[1]
-                            && gk >= interior_start[2]
-                            && gk < interior_end[2]
-                        {
-                            1.0
-                        } else {
-                            0.5 // Simple averaging in overlap regions
-                        };
+                        // Compute smooth weight function for partition of unity
+                        let weight = Self::compute_smooth_weight(
+                            gi,
+                            gj,
+                            gk,
+                            subdomain_start,
+                            subdomain_end,
+                            local.extended_start,
+                            local.extended_end,
+                            self.overlap,
+                        );
 
-                        global.data[[gi, gj, gk]] += local_solution.data[[li, lj, lk]] * weight;
-                        weights.data[[gi, gj, gk]] += Complex64::new(weight, 0.0);
+                        if weight > 1e-10 {
+                            global.data[[gi, gj, gk]] += local_solution.data[[li, lj, lk]] * weight;
+                            weights[gi][gj][gk] += weight;
+                        }
                     }
                 }
             }
         }
 
-        // Normalize by weights
+        // Normalize by weights to ensure partition of unity
         for i in 0..self.global_domain.shape.0 {
             for j in 0..self.global_domain.shape.1 {
                 for k in 0..self.global_domain.shape.2 {
-                    if weights.data[[i, j, k]].norm() > 1e-10 {
-                        global.data[[i, j, k]] /= weights.data[[i, j, k]];
+                    if weights[i][j][k] > 1e-10 {
+                        global.data[[i, j, k]] /= weights[i][j][k];
                     }
                 }
             }
+        }
+
+        // DEBUG: Check solution magnitude
+        let solution_max = global
+            .data
+            .iter()
+            .map(|c: &Complex64| c.norm())
+            .fold(0.0, f64::max);
+        println!(
+            "DEBUG: Gathered solution max magnitude: {:.2e}",
+            solution_max
+        );
+
+        // DEBUG: Check for zeros in the solution
+        let num_zeros = global.data.iter().filter(|c| c.norm() < 1e-15).count();
+        let total_points =
+            self.global_domain.shape.0 * self.global_domain.shape.1 * self.global_domain.shape.2;
+        if num_zeros > 0 {
+            println!(
+                "DEBUG: Warning - {} out of {} points are zero in gathered solution",
+                num_zeros, total_points
+            );
         }
 
         global

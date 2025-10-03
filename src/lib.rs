@@ -19,6 +19,10 @@ pub mod prelude {
     pub use crate::domain::helmholtz::HelmholtzDomain;
     pub use crate::domain::simulation::{simulate, SimulationParams, SimulationResult, Source};
     pub use crate::engine::array::{Complex64, WaveArray};
+    pub use crate::utilities::analytical::{
+        BoundaryCondition, CircleParams, CircularSolution, RectangleParams, RectangularSolution,
+        SphereParams, SphericalSolution,
+    };
     pub use crate::utilities::{add_absorbing_boundaries, create_source};
 }
 

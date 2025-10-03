@@ -12,3 +12,5 @@ pub mod simulation;
 pub use domain_trait::Domain;
 pub use helmholtz::HelmholtzDomain;
 pub use simulation::{simulate, SimulationParams};
+pub mod block_decomposition;
+pub mod schwarz_wave;

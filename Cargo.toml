@@ -1,8 +1,8 @@
 [package]
 name = "wavesim"
-version = "0.1.13"
+version = "0.1.17"
 edition = "2021"
-authors = ["Ivo Vellekoop <i.m.vellekoop@utwente.nl>", "Swapnil Mache <s.mache@utwente.nl>"]
+authors = ["Pierre F. Aubert pierre@spinorama.org"]
 description = "A library for simulating wave propagation using the modified Born series - Rust implementation"
 license = "MIT"
 repository = "https://github.com/pierreaubert/wavesim_rust"
@@ -11,6 +11,7 @@ repository = "https://github.com/pierreaubert/wavesim_rust"
 ndarray = { version = "0.16", features = ["rayon"] }
 num-complex = "0.4"
 num-traits = "0.2"
+nalgebra = "0.32"
 rayon = "1.10"
 num_cpus = "1.13"
 clap = { version = "4.5", features = ["derive"] }
@@ -19,6 +20,7 @@ anyhow = "1.0"
 rustfft = "6.2"
 rand = "0.8"
 plotly = "0.9"
+special = "0.10"
 
 [dev-dependencies]
 approx = "0.5"
@@ -35,3 +37,4 @@ path = "src/lib.rs"
 name = "room_acoustics"
 path = "bin/room_acoustics.rs"
 
+nalgebra = "0.32"
