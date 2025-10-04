@@ -1,9 +1,17 @@
 //! Array operations for wave simulations
+//!
+//! This module provides high-level array operations that automatically dispatch
+//! to the appropriate backend (Accelerate on Apple platforms, RustFFT elsewhere).
 
 use crate::engine::array::{Complex64, WaveArray};
+use crate::engine::backend::{default_backend, ComputeBackend};
 use ndarray::{Array3, Zip};
 use num_traits::Zero;
-use rustfft::{num_complex::Complex, FftPlanner};
+use once_cell::sync::Lazy;
+use std::sync::Arc;
+
+// Global backend instance (thread-safe, initialized once)
+static BACKEND: Lazy<Arc<Box<dyn ComputeBackend>>> = Lazy::new(|| Arc::new(default_backend()));
 
 /// Perform element-wise multiplication
 pub fn multiply(a: &WaveArray<Complex64>, b: &WaveArray<Complex64>) -> WaveArray<Complex64> {
@@ -21,24 +29,20 @@ pub fn divide(a: &WaveArray<Complex64>, b: &WaveArray<Complex64>) -> WaveArray<C
 
 /// Scale an array by a complex scalar and add an offset
 /// out = scale * input + offset
+///
+/// Uses the optimized backend for better performance on supported platforms.
 pub fn scale(
     scale: Complex64,
     input: &WaveArray<Complex64>,
     offset: Option<Complex64>,
     out: &mut WaveArray<Complex64>,
 ) {
-    if let Some(off) = offset {
-        Zip::from(&mut out.data)
-            .and(&input.data)
-            .for_each(|o, &i| *o = scale * i + off);
-    } else {
-        Zip::from(&mut out.data)
-            .and(&input.data)
-            .for_each(|o, &i| *o = scale * i);
-    }
+    BACKEND.scale(scale, &input.data, offset, &mut out.data);
 }
 
 /// Mix two arrays: out = alpha * a + beta * b
+///
+/// Uses the optimized backend for better performance on supported platforms.
 pub fn mix(
     alpha: Complex64,
     a: &WaveArray<Complex64>,
@@ -46,24 +50,19 @@ pub fn mix(
     b: &WaveArray<Complex64>,
     out: &mut WaveArray<Complex64>,
 ) {
-    Zip::from(&mut out.data)
-        .and(&a.data)
-        .and(&b.data)
-        .for_each(|o, &a_val, &b_val| *o = alpha * a_val + beta * b_val);
+    BACKEND.mix(alpha, &a.data, beta, &b.data, &mut out.data);
 }
 
 /// Linear interpolation: out = a + weight * (b - a)
+///
+/// Uses the optimized backend for better performance on supported platforms.
 pub fn lerp(
     a: &WaveArray<Complex64>,
     b: &WaveArray<Complex64>,
     weight: &WaveArray<Complex64>,
     out: &mut WaveArray<Complex64>,
 ) {
-    Zip::from(&mut out.data)
-        .and(&a.data)
-        .and(&b.data)
-        .and(&weight.data)
-        .for_each(|o, &a_val, &b_val, &w| *o = a_val + w * (b_val - a_val));
+    BACKEND.lerp(&a.data, &b.data, &weight.data, &mut out.data);
 }
 
 /// Copy data from one array to another
@@ -72,113 +71,21 @@ pub fn copy(source: &WaveArray<Complex64>, dest: &mut WaveArray<Complex64>) {
 }
 
 /// Perform 3D FFT
+///
+/// This function automatically uses the best available backend:
+/// - Apple Accelerate framework on macOS/iOS (when compiled with --features accelerate)
+/// - RustFFT on all other platforms or when Accelerate is not enabled
 pub fn fft_3d(input: &WaveArray<Complex64>, output: &mut WaveArray<Complex64>) {
-    // For simplicity, we'll use rustfft for 1D FFTs along each axis
-    // In production, we'd want to use a more optimized 3D FFT implementation
-
-    let shape = input.shape();
-    output.data.assign(&input.data);
-
-    let mut planner = FftPlanner::new();
-
-    // FFT along axis 0
-    for j in 0..shape[1] {
-        for k in 0..shape[2] {
-            let mut slice: Vec<Complex<f64>> =
-                (0..shape[0]).map(|i| output.data[[i, j, k]]).collect();
-
-            let fft = planner.plan_fft_forward(shape[0]);
-            fft.process(&mut slice);
-
-            for (i, val) in slice.iter().enumerate() {
-                output.data[[i, j, k]] = *val;
-            }
-        }
-    }
-
-    // FFT along axis 1
-    for i in 0..shape[0] {
-        for k in 0..shape[2] {
-            let mut slice: Vec<Complex<f64>> =
-                (0..shape[1]).map(|j| output.data[[i, j, k]]).collect();
-
-            let fft = planner.plan_fft_forward(shape[1]);
-            fft.process(&mut slice);
-
-            for (j, val) in slice.iter().enumerate() {
-                output.data[[i, j, k]] = *val;
-            }
-        }
-    }
-
-    // FFT along axis 2
-    for i in 0..shape[0] {
-        for j in 0..shape[1] {
-            let mut slice: Vec<Complex<f64>> =
-                (0..shape[2]).map(|k| output.data[[i, j, k]]).collect();
-
-            let fft = planner.plan_fft_forward(shape[2]);
-            fft.process(&mut slice);
-
-            for (k, val) in slice.iter().enumerate() {
-                output.data[[i, j, k]] = *val;
-            }
-        }
-    }
+    BACKEND.fft_3d(&input.data, &mut output.data);
 }
 
 /// Perform 3D inverse FFT
+///
+/// This function automatically uses the best available backend:
+/// - Apple Accelerate framework on macOS/iOS (when compiled with --features accelerate)
+/// - RustFFT on all other platforms or when Accelerate is not enabled
 pub fn ifft_3d(input: &WaveArray<Complex64>, output: &mut WaveArray<Complex64>) {
-    let shape = input.shape();
-    output.data.assign(&input.data);
-
-    let mut planner = FftPlanner::new();
-    let normalization = 1.0 / (shape[0] * shape[1] * shape[2]) as f64;
-
-    // IFFT along axis 0
-    for j in 0..shape[1] {
-        for k in 0..shape[2] {
-            let mut slice: Vec<Complex<f64>> =
-                (0..shape[0]).map(|i| output.data[[i, j, k]]).collect();
-
-            let fft = planner.plan_fft_inverse(shape[0]);
-            fft.process(&mut slice);
-
-            for (i, val) in slice.iter().enumerate() {
-                output.data[[i, j, k]] = *val;
-            }
-        }
-    }
-
-    // IFFT along axis 1
-    for i in 0..shape[0] {
-        for k in 0..shape[2] {
-            let mut slice: Vec<Complex<f64>> =
-                (0..shape[1]).map(|j| output.data[[i, j, k]]).collect();
-
-            let fft = planner.plan_fft_inverse(shape[1]);
-            fft.process(&mut slice);
-
-            for (j, val) in slice.iter().enumerate() {
-                output.data[[i, j, k]] = *val;
-            }
-        }
-    }
-
-    // IFFT along axis 2
-    for i in 0..shape[0] {
-        for j in 0..shape[1] {
-            let mut slice: Vec<Complex<f64>> =
-                (0..shape[2]).map(|k| output.data[[i, j, k]]).collect();
-
-            let fft = planner.plan_fft_inverse(shape[2]);
-            fft.process(&mut slice);
-
-            for (k, val) in slice.iter().enumerate() {
-                output.data[[i, j, k]] = *val * normalization;
-            }
-        }
-    }
+    BACKEND.ifft_3d(&input.data, &mut output.data);
 }
 
 /// Matrix multiplication along specified axis

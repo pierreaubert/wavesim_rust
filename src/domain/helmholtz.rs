@@ -126,18 +126,39 @@ impl HelmholtzDomain {
         kernels
     }
 
-    /// Create periodic Laplace kernel
+    /// Create periodic Laplace kernel using FFT frequency convention
+    ///
+    /// This computes the Fourier-space representation of the Laplace operator
+    /// for periodic boundaries, matching the Python implementation.
+    ///
+    /// The kernel is computed as: `kernel[i] = -k_i^2`
+    /// where `k_i` is the i-th FFT frequency following NumPy's `fftfreq` convention.
+    ///
+    /// # Arguments
+    /// * `length` - The number of points in the 1D kernel
+    /// * `pixel_size` - The spatial discretization step size
+    ///
+    /// # Returns
+    /// A 1D array of complex numbers representing the Laplace kernel in Fourier space
+    ///
+    /// # Reference
+    /// Python implementation: `kernel_1d = -np.fft.fftfreq(length, d=pixel_size / (2.0 * np.pi)) ** 2`
     fn periodic_laplace_kernel(length: usize, pixel_size: f64) -> Array1<Complex64> {
         let mut kernel = Array1::zeros(length);
 
+        // d parameter matching Python's fftfreq convention
+        let d = pixel_size / (2.0 * PI);
+
         for i in 0..length {
-            let k = if i <= length / 2 {
-                2.0 * PI * i as f64 / (length as f64 * pixel_size)
+            // FFT frequency convention: [0, 1, ..., n/2-1, -n/2, ..., -1] / (d*n)
+            let freq = if i <= length / 2 {
+                i as f64 / (d * length as f64)
             } else {
-                -2.0 * PI * (length - i) as f64 / (length as f64 * pixel_size)
+                (i as f64 - length as f64) / (d * length as f64)
             };
 
-            kernel[i] = Complex::new(-k * k, 0.0);
+            // Laplace kernel is the negative square of the frequency
+            kernel[i] = Complex::new(-freq * freq, 0.0);
         }
 
         kernel
@@ -390,5 +411,132 @@ mod tests {
         // Check that we get reasonable values
         assert!(shift.norm() > 0.0);
         assert!(scale.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_periodic_laplace_kernel() {
+        use approx::assert_abs_diff_eq;
+
+        // Test with length=8, pixel_size=1.0 (simple test case)
+        let length = 8;
+        let pixel_size = 1.0;
+        let kernel = HelmholtzDomain::periodic_laplace_kernel(length, pixel_size);
+
+        // The d parameter in Python's fftfreq convention
+        let d = pixel_size / (2.0 * PI);
+
+        // Verify kernel values match expected FFT frequencies squared and negated
+        // For length=8, frequencies should be: [0, 1, 2, 3, -4, -3, -2, -1] / (d*8)
+        let expected_freqs = vec![0.0, 1.0, 2.0, 3.0, -4.0, -3.0, -2.0, -1.0];
+
+        for (i, &expected_freq) in expected_freqs.iter().enumerate() {
+            let freq = expected_freq / (d * length as f64);
+            let expected_kernel_val = -freq * freq;
+            assert_abs_diff_eq!(kernel[i].re, expected_kernel_val, epsilon = 1e-10);
+            assert_abs_diff_eq!(kernel[i].im, 0.0, epsilon = 1e-10);
+        }
+
+        // First element should always be zero (DC component)
+        assert_abs_diff_eq!(kernel[0].re, 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(kernel[0].im, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_periodic_laplace_kernel_odd_length() {
+        use approx::assert_abs_diff_eq;
+
+        // Test with odd length
+        let length = 9;
+        let pixel_size = 0.5;
+        let kernel = HelmholtzDomain::periodic_laplace_kernel(length, pixel_size);
+
+        let d = pixel_size / (2.0 * PI);
+
+        // For length=9, frequencies should be: [0, 1, 2, 3, 4, -4, -3, -2, -1] / (d*9)
+        let expected_freqs = vec![0.0, 1.0, 2.0, 3.0, 4.0, -4.0, -3.0, -2.0, -1.0];
+
+        for (i, &expected_freq) in expected_freqs.iter().enumerate() {
+            let freq = expected_freq / (d * length as f64);
+            let expected_kernel_val = -freq * freq;
+            assert_abs_diff_eq!(kernel[i].re, expected_kernel_val, epsilon = 1e-10);
+        }
+
+        // First element should be zero
+        assert_abs_diff_eq!(kernel[0].re, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_periodic_vs_nonperiodic_helmholtz() {
+        // Create a simple test case with a homogeneous medium
+        let shape = (16, 16, 16);
+        let permittivity = WaveArray::from_scalar(shape, Complex::new(1.0, 0.0));
+        let pixel_size = 0.1;
+        let wavelength = 1.0;
+
+        // Create periodic domain
+        let domain_periodic = HelmholtzDomain::new(
+            permittivity.clone(),
+            pixel_size,
+            wavelength,
+            [true, true, true],
+            [[0, 0], [0, 0], [0, 0]],
+        );
+
+        // Create non-periodic domain
+        let domain_nonperiodic = HelmholtzDomain::new(
+            permittivity.clone(),
+            pixel_size,
+            wavelength,
+            [false, false, false],
+            [[2, 2], [2, 2], [2, 2]],
+        );
+
+        // Test that kernels are different
+        // The key difference is in how the frequency components are computed
+        assert!(
+            domain_periodic.laplace_kernels[0].data[[1, 0, 0]]
+                != domain_nonperiodic.laplace_kernels[0].data[[1, 0, 0]],
+            "Periodic and non-periodic kernels should be different"
+        );
+
+        // Verify that periodic kernel has the expected structure
+        // DC component (0 frequency) should be zero
+        assert_eq!(
+            domain_periodic.laplace_kernels[0].data[[0, 0, 0]].re,
+            domain_periodic.laplace_kernels[1].data[[0, 0, 0]].re,
+            "DC components should be equal across dimensions"
+        );
+
+        // Test propagator on a simple input
+        let mut input = WaveArray::zeros(shape);
+        input.data[[8, 8, 8]] = Complex::new(1.0, 0.0); // Point source in center
+
+        let mut output_periodic = WaveArray::zeros(shape);
+        let mut output_nonperiodic = WaveArray::zeros(shape);
+
+        domain_periodic.propagator(&input, &mut output_periodic);
+        domain_nonperiodic.propagator(&input, &mut output_nonperiodic);
+
+        // Both should produce non-zero output
+        assert!(
+            output_periodic.data[[8, 8, 8]].norm() > 0.0,
+            "Periodic domain propagator should produce non-zero output"
+        );
+        assert!(
+            output_nonperiodic.data[[8, 8, 8]].norm() > 0.0,
+            "Non-periodic domain propagator should produce non-zero output"
+        );
+
+        // The outputs will differ due to different boundary conditions
+        // This is expected behavior, not a bug
+        println!(
+            "Periodic center value: {}",
+            output_periodic.data[[8, 8, 8]].norm()
+        );
+        println!(
+            "Non-periodic center value: {}",
+            output_nonperiodic.data[[8, 8, 8]].norm()
+        );
+        println!("Note: Different values are expected due to different boundary conditions");
     }
 }

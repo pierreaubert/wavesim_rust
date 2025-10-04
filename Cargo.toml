@@ -1,11 +1,15 @@
 [package]
 name = "wavesim"
-version = "0.1.17"
+version = "0.1.20"
 edition = "2021"
 authors = ["Pierre F. Aubert pierre@spinorama.org"]
 description = "A library for simulating wave propagation using the modified Born series - Rust implementation"
 license = "MIT"
 repository = "https://github.com/pierreaubert/wavesim_rust"
+
+[features]
+default = []
+accelerate = ["accelerate-src"]
 
 [dependencies]
 ndarray = { version = "0.16", features = ["rayon"] }
@@ -21,6 +25,10 @@ rustfft = "6.2"
 rand = "0.8"
 plotly = "0.9"
 special = "0.10"
+once_cell = "1.19"
+
+# Accelerate framework support for macOS/iOS (optional)
+accelerate-src = { version = "0.3", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -36,5 +44,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "room_acoustics"
 path = "bin/room_acoustics.rs"
-
-nalgebra = "0.32"

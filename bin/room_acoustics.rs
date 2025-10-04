@@ -14,9 +14,7 @@ use std::env;
 use std::f64::consts::PI;
 use wavesim::{
     domain::block_decomposition::solve_helmholtz_block,
-    domain::helmholtz_schwarz::solve_helmholtz_schwarz,
-    engine::array::WaveArray,
-    utilities::analytical::{BoundaryCondition, RectangleParams, RectangularSolution},
+    domain::helmholtz_schwarz::solve_helmholtz_schwarz, engine::array::WaveArray,
 };
 
 type Complex64 = Complex<f64>;
@@ -118,10 +116,6 @@ struct Args {
     /// Domain decomposition method: block (default) or schwarz
     #[arg(long, default_value = "block")]
     decomposition_method: String,
-
-    /// Compare with analytical solutions (rectangular rooms only)
-    #[arg(long, default_value_t = false)]
-    compare_analytical: bool,
 }
 
 /// Room configuration
@@ -137,7 +131,6 @@ struct RoomConfig {
     max_grid_resolution: usize, // maximum points per meter (command-line)
     source_spl: f64,
     decomposition_method: String, // Domain decomposition method
-    compare_analytical: bool,     // Whether to compare with analytical solutions
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -206,7 +199,6 @@ impl RoomConfig {
             max_grid_resolution: args.grid_resolution,
             source_spl: args.source_spl,
             decomposition_method: args.decomposition_method.clone(),
-            compare_analytical: args.compare_analytical,
         }
     }
 }
@@ -839,178 +831,6 @@ fn plot_fields_multi_frequency(
     plot.write_html(filename);
 }
 
-/// Analytical solution wrapper for room acoustics
-mod analytical_room {
-    use super::*;
-
-    #[derive(Debug)]
-    pub struct AnalyticalComparison {
-        pub l2_error: f64,
-        pub max_error: f64,
-        pub relative_l2_error: f64,
-        pub analytical_field: WaveArray<Complex64>,
-    }
-
-    /// Compute analytical solution for rectangular room
-    pub fn compute_analytical_solution(
-        config: &RoomConfig,
-        freq: f64,
-        pixel_size: f64,
-        grid_shape: (usize, usize, usize),
-    ) -> Option<WaveArray<Complex64>> {
-        // Only support rectangular rooms
-        if config.shape != RoomShape::Rectangle {
-            return None;
-        }
-
-        // Convert frequency to wavenumber
-        let c_sound = 343.0; // m/s
-        let wavelength = c_sound / freq;
-        let k = 2.0 * PI / wavelength;
-
-        // Create analytical solution parameters for rectangular room
-        // Use Neumann boundary conditions (rigid walls) typical for room acoustics
-        let params = RectangleParams {
-            dimensions: [config.width, config.depth, config.height],
-            boundary_conditions: [BoundaryCondition::Neumann; 6],
-            max_modes: [
-                5,
-                5,
-                if config.mode == SimulationMode::TwoD {
-                    1
-                } else {
-                    5
-                },
-            ],
-        };
-
-        let mut solution = RectangularSolution::new(params);
-
-        // For room acoustics, we need to set appropriate coefficients
-        // This is a simplified approach - in practice, coefficients would be
-        // determined by the specific source and boundary conditions
-        let num_modes = solution.eigenvalues().len();
-        let mut coefficients = vec![Complex64::new(0.0, 0.0); num_modes];
-
-        // Set a few low-frequency modes with simple coefficients
-        // This is a heuristic approach for demonstration
-        for (i, coeff) in coefficients.iter_mut().enumerate().take(8.min(num_modes)) {
-            let decay_factor = (-0.5 * i as f64).exp(); // Exponential decay
-            *coeff = Complex64::new(decay_factor, 0.0);
-        }
-
-        solution.set_coefficients(coefficients);
-
-        // Evaluate solution on grid
-        let grid_spacing = [pixel_size; 3];
-        let offset = [0.0; 3];
-
-        Some(solution.evaluate_on_grid(grid_shape, grid_spacing, offset))
-    }
-
-    /// Compare numerical and analytical solutions
-    pub fn compare_solutions(
-        numerical: &WaveArray<Complex64>,
-        analytical: &WaveArray<Complex64>,
-    ) -> AnalyticalComparison {
-        let (l2_error, max_error, relative_l2_error) =
-            wavesim::utilities::analytical::compare_solutions(numerical, analytical);
-
-        AnalyticalComparison {
-            l2_error,
-            max_error,
-            relative_l2_error,
-            analytical_field: analytical.clone(),
-        }
-    }
-
-    /// Plot comparison between numerical and analytical solutions
-    pub fn plot_comparison(
-        numerical: &WaveArray<Complex64>,
-        analytical: &WaveArray<Complex64>,
-        error_field: &WaveArray<Complex64>,
-        pixel_size: f64,
-        freq: f64,
-        slice_z: usize,
-        config: &RoomConfig,
-    ) {
-        let shape = numerical.shape_tuple();
-        let (nx, ny, _nz) = shape;
-
-        // Create three plots side by side
-        let plots_data = vec![
-            ("Numerical", numerical),
-            ("Analytical", analytical),
-            ("Error (Num-Ana)", error_field),
-        ];
-
-        for (i, (name, field)) in plots_data.iter().enumerate() {
-            let mut magnitude = vec![];
-
-            for j in 0..ny {
-                let mut row = vec![];
-                for k in 0..nx {
-                    let val = field.data[[k, j, slice_z]].norm();
-                    // Convert to dB SPL for numerical/analytical, linear scale for error
-                    let db_val = if i < 2 {
-                        20.0 * (val / REFERENCEPRESSURE).log10()
-                    } else {
-                        val // Linear scale for error
-                    };
-                    row.push(db_val);
-                }
-                magnitude.push(row);
-            }
-
-            // Create coordinate arrays
-            let x_coords: Vec<f64> = (0..nx)
-                .map(|k| (k as f64 / nx as f64) * config.width)
-                .collect();
-            let y_coords: Vec<f64> = (0..ny)
-                .map(|j| (j as f64 / ny as f64) * config.depth)
-                .collect();
-
-            let trace = HeatMap::new_z(magnitude)
-                .x(x_coords)
-                .y(y_coords)
-                .color_scale(ColorScale::Palette(ColorScalePalette::Viridis));
-
-            let title = if i < 2 {
-                format!("{} Solution - {:.0} Hz (dB SPL)", name, freq)
-            } else {
-                format!("{} - {:.0} Hz (Linear Scale)", name, freq)
-            };
-
-            let layout = Layout::new()
-                .title(Title::from(title))
-                .x_axis(Axis::new().title("X (m)").range(vec![0.0, config.width]))
-                .y_axis(Axis::new().title("Y (m)").range(vec![0.0, config.depth]))
-                .height(500)
-                .width(600);
-
-            let mut plot = Plot::new();
-            plot.add_trace(trace);
-            plot.set_layout(layout);
-
-            let filename = format!(
-                "plots/comparison_{}_{:.0}hz.html",
-                name.to_lowercase()
-                    .replace(" ", "_")
-                    .replace("(", "")
-                    .replace(")", "")
-                    .replace("-", ""),
-                freq
-            );
-            plot.write_html(&filename);
-            println!(
-                "  Saved {} comparison plot: {}",
-                name.to_lowercase(),
-                filename
-            );
-        }
-    }
-}
-
 fn main() {
     // Parse command-line arguments
     let args = Args::parse();
@@ -1102,28 +922,6 @@ fn main() {
     );
     println!("  Note: Actual resolution will be optimized per frequency");
 
-    // Check analytical comparison requirements
-    if config.compare_analytical {
-        if config.shape != RoomShape::Rectangle {
-            println!("\n⚠️  WARNING: Analytical comparison only available for rectangular rooms!");
-            println!(
-                "    Current shape: {:?}. Analytical comparison will be skipped.\n",
-                config.shape
-            );
-        } else {
-            println!("\n✅ Analytical comparison enabled for rectangular room");
-            println!("    Using Neumann boundary conditions (rigid walls)");
-            println!(
-                "    Max modes: [5, 5, {}]\n",
-                if config.mode == SimulationMode::TwoD {
-                    "1"
-                } else {
-                    "5"
-                }
-            );
-        }
-    }
-
     println!("\nFrequency Analysis:");
     println!("  Range: {:.1} - {:.1} Hz", args.min_freq, args.max_freq);
     println!("  Number of points: {}\n", args.nb_freq);
@@ -1181,28 +979,18 @@ fn main() {
             .collect()
     };
 
-    // Update console header based on analytical comparison
-    if config.compare_analytical && config.shape == RoomShape::Rectangle {
-        println!(
-            "Frequency (Hz) | SPL (dB) | Phase (°) | Resolution | Grid Size | Subdomains | Iterations | L2 Error | Max Error"
-        );
-        println!(
-            "---------------|----------|-----------|------------|-----------|------------|------------|----------|----------"
-        );
-    } else {
-        println!(
-            "Frequency (Hz) | SPL (dB) | Phase (°) | Resolution | Grid Size | Subdomains | Iterations"
-        );
-        println!(
-            "---------------|----------|-----------|------------|-----------|------------|------------"
-        );
-    }
+    // Console header
+    println!(
+        "Frequency (Hz) | SPL (dB) | Phase (°) | Resolution | Grid Size | Subdomains | Iterations"
+    );
+    println!(
+        "---------------|----------|-----------|------------|-----------|------------|------------"
+    );
 
     // Process frequencies sequentially, but use domain decomposition within each solve
     let mut spl_values = vec![];
     let mut phase_values = vec![];
     let mut field_data = vec![]; // Store fields for multi-frequency plot
-    let mut error_metrics = vec![]; // Store error metrics for analytical comparison
 
     for &freq in &frequencies {
         // Get full field for plotting
@@ -1244,86 +1032,19 @@ fn main() {
             nz_field / 2
         };
 
-        // Perform analytical comparison if enabled
-        let analytical_comparison =
-            if config.compare_analytical && config.shape == RoomShape::Rectangle {
-                if let Some(analytical_field) = analytical_room::compute_analytical_solution(
-                    &config,
-                    freq,
-                    pixel_size,
-                    (nx, ny, nz),
-                ) {
-                    let comparison = analytical_room::compare_solutions(&field, &analytical_field);
-
-                    // Create error field for visualization
-                    let mut error_field = field.clone();
-                    for (num_val, ana_val) in error_field
-                        .data
-                        .iter_mut()
-                        .zip(analytical_field.data.iter())
-                    {
-                        *num_val = *num_val - *ana_val;
-                    }
-
-                    // Generate comparison plots
-                    analytical_room::plot_comparison(
-                        &field,
-                        &analytical_field,
-                        &error_field,
-                        pixel_size,
-                        freq,
-                        z_slice,
-                        &config,
-                    );
-
-                    Some((
-                        comparison.l2_error,
-                        comparison.max_error,
-                        comparison.relative_l2_error,
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-        // Store error metrics
-        if let Some((l2_err, max_err, rel_err)) = analytical_comparison {
-            error_metrics.push((freq, l2_err, max_err, rel_err));
-        }
-
-        // Print results with or without analytical comparison
-        if config.compare_analytical && config.shape == RoomShape::Rectangle {
-            if let Some((l2_err, max_err, _rel_err)) = analytical_comparison {
-                println!(
-                    "{:14.1} | {:8.2} | {:9.1} | {:6} pt/m | {:9} | {:4}x{:1}x{:1} | {:10} | {:8.2e} | {:8.2e}",
-                    freq, spl, phase, grid_res, total_cells,
-                    subdomains.0, subdomains.1, subdomains.2, iters,
-                    l2_err, max_err
-                );
-            } else {
-                println!(
-                    "{:14.1} | {:8.2} | {:9.1} | {:6} pt/m | {:9} | {:4}x{:1}x{:1} | {:10} | {:>8} | {:>8}",
-                    freq, spl, phase, grid_res, total_cells,
-                    subdomains.0, subdomains.1, subdomains.2, iters,
-                    "N/A", "N/A"
-                );
-            }
-        } else {
-            println!(
-                "{:14.1} | {:8.2} | {:9.1} | {:6} pt/m | {:9} | {:4}x{:1}x{:1} | {:10}",
-                freq,
-                spl,
-                phase,
-                grid_res,
-                total_cells,
-                subdomains.0,
-                subdomains.1,
-                subdomains.2,
-                iters
-            );
-        }
+        // Print results
+        println!(
+            "{:14.1} | {:8.2} | {:9.1} | {:6} pt/m | {:9} | {:4}x{:1}x{:1} | {:10}",
+            freq,
+            spl,
+            phase,
+            grid_res,
+            total_cells,
+            subdomains.0,
+            subdomains.1,
+            subdomains.2,
+            iters
+        );
 
         // Store field for multi-frequency plot
         let nz = field.data.shape()[2];
@@ -1418,67 +1139,6 @@ fn main() {
         println!("Saved multi-frequency field plot to plots/room_fields_all_frequencies.html");
     }
 
-    // Plot analytical comparison summary if available
-    if !error_metrics.is_empty() {
-        println!("\nGenerating analytical comparison summary...");
-
-        let freqs: Vec<f64> = error_metrics.iter().map(|(f, _, _, _)| *f).collect();
-        let l2_errors: Vec<f64> = error_metrics.iter().map(|(_, l2, _, _)| *l2).collect();
-        let max_errors: Vec<f64> = error_metrics.iter().map(|(_, _, max, _)| *max).collect();
-        let rel_errors: Vec<f64> = error_metrics.iter().map(|(_, _, _, rel)| *rel).collect();
-
-        // Plot L2 error vs frequency
-        let l2_trace = Scatter::new(freqs.clone(), l2_errors.clone())
-            .mode(Mode::LinesMarkers)
-            .name("L2 Error")
-            .line(plotly::common::Line::new().color("blue").width(2.0));
-
-        let max_trace = Scatter::new(freqs.clone(), max_errors.clone())
-            .mode(Mode::LinesMarkers)
-            .name("Max Error")
-            .line(
-                plotly::common::Line::new()
-                    .color("red")
-                    .width(2.0)
-                    .dash(plotly::common::DashType::Dash),
-            );
-
-        let error_layout = Layout::new()
-            .title(Title::from("Analytical Comparison - Error vs Frequency"))
-            .x_axis(
-                Axis::new()
-                    .title("Frequency (Hz)")
-                    .type_(plotly::layout::AxisType::Log)
-                    .grid_color("lightgray"),
-            )
-            .y_axis(
-                Axis::new()
-                    .title("Error")
-                    .type_(plotly::layout::AxisType::Log),
-            )
-            .height(500)
-            .width(800);
-
-        let mut error_plot = Plot::new();
-        error_plot.add_trace(l2_trace);
-        error_plot.add_trace(max_trace);
-        error_plot.set_layout(error_layout);
-        error_plot.write_html("plots/analytical_error_summary.html");
-
-        println!("  Saved error summary plot: plots/analytical_error_summary.html");
-
-        // Print summary statistics
-        let avg_l2_error = l2_errors.iter().sum::<f64>() / l2_errors.len() as f64;
-        let avg_max_error = max_errors.iter().sum::<f64>() / max_errors.len() as f64;
-        let avg_rel_error = rel_errors.iter().sum::<f64>() / rel_errors.len() as f64;
-
-        println!("\nAnalytical Comparison Summary:");
-        println!("  Average L2 error: {:.2e}", avg_l2_error);
-        println!("  Average max error: {:.2e}", avg_max_error);
-        println!("  Average relative error: {:.2e}", avg_rel_error);
-        println!("  Number of frequencies compared: {}", error_metrics.len());
-    }
-
     // Calculate theoretical room modes
     println!("\nTheoretical Room Modes:");
     let c = 343.0;
@@ -1514,11 +1174,4 @@ fn main() {
     }
 
     println!("\nPlots saved to 'plots/' directory!");
-
-    // Show usage examples including analytical comparison
-    if config.compare_analytical && !error_metrics.is_empty() {
-        println!("\nAnalytical comparison plots generated:");
-        println!("  - Individual frequency comparisons: plots/comparison_*_<freq>hz.html");
-        println!("  - Error summary: plots/analytical_error_summary.html");
-    }
 }

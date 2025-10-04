@@ -1,6 +1,7 @@
 //! Utility functions for wave simulations
 
 pub mod analytical;
+pub mod domain_sizing;
 
 use crate::engine::array::{Complex64, WaveArray};
 use ndarray::{Array1, Array3};

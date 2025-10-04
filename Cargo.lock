@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "accelerate-src"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1637,8 +1643,9 @@ dependencies = [
 
 [[package]]
 name = "wavesim"
-version = "0.1.17"
+version = "0.1.20"
 dependencies = [
+ "accelerate-src",
  "anyhow",
  "approx",
  "clap",
@@ -1648,6 +1655,7 @@ dependencies = [
  "num-complex",
  "num-traits",
  "num_cpus",
+ "once_cell",
  "plotly",
  "proptest",
  "rand 0.8.5",
